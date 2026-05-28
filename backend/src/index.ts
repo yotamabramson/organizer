@@ -73,10 +73,21 @@ server.get('/api/jira/issues', async (request, reply) => {
 
   try {
     const auth = Buffer.from(`${jiraConfig.email}:${jiraConfig.token}`).toString('base64');
-    const response = await axios.get(`https://${jiraConfig.domain}/rest/api/3/search/jql?jql=assignee=currentUser() AND statusCategory != Done`, {
+    const url = `https://${jiraConfig.domain}/rest/api/3/search`;
+    
+    const response = await axios.post(url, {
+      jql: "assignee = currentUser() AND statusCategory != Done",
+      maxResults: 50,
+      fields: [
+        "summary",
+        "status",
+        "assignee"
+      ]
+    }, {
       headers: {
         'Authorization': `Basic ${auth}`,
-        'Accept': 'application/json'
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
       }
     });
 
@@ -118,11 +129,50 @@ server.post('/api/chat', async (request, reply) => {
     return reply.status(400).send({ error: 'Message is required' });
   }
 
+  let fullPrompt = message;
+
+  // 1. Fetch tickets if Jira is connected
+  if (jiraConfig.domain && jiraConfig.token) {
+    try {
+      const auth = Buffer.from(`${jiraConfig.email}:${jiraConfig.token}`).toString('base64');
+      const url = `https://${jiraConfig.domain}/rest/api/3/search/jql/`;
+      
+      const response = await axios.post(url, {
+        jql: "assignee = currentUser() AND statusCategory != Done",
+        maxResults: 50,
+        fields: [
+          "summary",
+          "status",
+          "assignee"
+        ]
+      }, {
+        headers: {
+          'Authorization': `Basic ${auth}`,
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        }
+      });
+
+      const issues = response.data.issues.map((issue: any) => ({
+        key: issue.key,
+        summary: issue.fields.summary,
+        status: issue.fields.status.name,
+      }));
+
+      if (issues.length > 0) {
+        const ticketsContext = issues.map((i: any) => `- [${i.key}] ${i.summary} (${i.status})`).join('\n');
+        fullPrompt = `You are a helpful assistant. Use the following Jira context to help the user:\n\nActive Jira Tickets:\n${ticketsContext}\n\nUser Message: ${message}`;
+      }
+    } catch (err) {
+      server.log.error({ err }, "Failed to fetch Jira context for chat");
+    }
+  }
+
   try {
     const chatGenerator = await initModel();
     
     const messages = [
-      { role: 'user', content: message },
+      { role: 'user', content: fullPrompt },
     ];
 
     const output = await chatGenerator(messages, {
