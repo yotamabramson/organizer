@@ -153,7 +153,23 @@ server.post('/api/jira/disconnect', async (request, reply) => {
 
 server.get('/api/github/status', async (request, reply) => {
   const connected = !!githubConfig.token;
-  return { connected };
+  let username = '';
+  
+  if (connected) {
+    try {
+      const response = await axios.get('https://api.github.com/user', {
+        headers: {
+          'Authorization': `token ${githubConfig.token}`,
+          'Accept': 'application/vnd.github.v3+json'
+        }
+      });
+      username = response.data.login;
+    } catch (err) {
+      server.log.error('Failed to fetch GitHub user during status check');
+    }
+  }
+  
+  return { connected, username };
 });
 
 server.post('/api/github/disconnect', async (request, reply) => {
@@ -287,10 +303,11 @@ server.post('/api/chat', async (request, reply) => {
     }
   }
 
-  // 2. Fetch PRs if GitHub is connected
+  // 2. Fetch PRs and Repositories if GitHub is connected
   if (githubConfig.token) {
     try {
-      const response = await axios.get('https://api.github.com/search/issues', {
+      // Fetch PRs
+      const prsResponse = await axios.get('https://api.github.com/search/issues', {
         params: {
           q: 'is:open is:pr author:@me',
         },
@@ -300,15 +317,35 @@ server.post('/api/chat', async (request, reply) => {
         }
       });
 
-      const prs = response.data.items.map((pr: any) => `- [#${pr.number}] ${pr.title} (Repo: ${pr.repository_url.split('/').pop()})`);
+      const prs = prsResponse.data.items.map((pr: any) => `- [#${pr.number}] ${pr.title} (Repo: ${pr.repository_url.split('/').pop()})`);
 
+      // Fetch Repositories
+      const reposResponse = await axios.get('https://api.github.com/user/repos', {
+        params: {
+          sort: 'updated',
+          per_page: 20
+        },
+        headers: {
+          'Authorization': `token ${githubConfig.token}`,
+          'Accept': 'application/vnd.github.v3+json'
+        }
+      });
+
+      const repoNames = reposResponse.data.map((repo: any) => repo.name).join(', ');
+
+      let githubContext = '';
       if (prs.length > 0) {
-        const prContext = prs.join('\n');
-        // Handle case where Jira context was already added
+        githubContext += `Open GitHub Pull Requests:\n${prs.join('\n')}\n\n`;
+      }
+      if (repoNames) {
+        githubContext += `Your GitHub Repositories: ${repoNames}\n\n`;
+      }
+
+      if (githubContext) {
         if (fullPrompt.includes('Active Jira Tickets')) {
-          fullPrompt = fullPrompt.replace('\n\nUser Message:', `\n\nOpen GitHub Pull Requests:\n${prContext}\n\nUser Message:`);
+          fullPrompt = fullPrompt.replace('\n\nUser Message:', `\n\n${githubContext}User Message:`);
         } else {
-          fullPrompt = `You are a helpful assistant. Use the following GitHub context to help the user:\n\nOpen GitHub Pull Requests:\n${prContext}\n\nUser Message: ${message}`;
+          fullPrompt = `You are a helpful assistant. Use the following GitHub context to help the user:\n\n${githubContext}User Message: ${message}`;
         }
       }
     } catch (err) {
