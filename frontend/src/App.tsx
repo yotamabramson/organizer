@@ -7,7 +7,10 @@ import {
   GitPullRequest, 
   Send,
   Loader2,
-  CheckCircle2
+  CheckCircle2,
+  Settings,
+  Sparkles,
+  Cpu
 } from 'lucide-react';
 
 interface JiraIssue {
@@ -43,6 +46,10 @@ const App = () => {
   const [githubToken, setGithubToken] = useState('');
   const [githubUsername, setGithubUsername] = useState('');
 
+  const [aiProvider, setAiProvider] = useState('local');
+  const [geminiApiKey, setGeminiApiKey] = useState('');
+  const [showSettings, setShowSettings] = useState(false);
+
   const [isConnecting, setIsConnecting] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -59,7 +66,36 @@ const App = () => {
   useEffect(() => {
     checkJiraStatus();
     checkGithubStatus();
+    fetchAiConfig();
   }, []);
+
+  const fetchAiConfig = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/ai/config`);
+      const data = await res.json();
+      setAiProvider(data.provider);
+      setGeminiApiKey(data.geminiApiKey || '');
+    } catch (err) {
+      console.error('Failed to fetch AI config', err);
+    }
+  };
+
+  const updateAiConfig = async (newProvider: string, newApiKey?: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/ai/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: newProvider, geminiApiKey: newApiKey ?? geminiApiKey })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAiProvider(data.config.provider);
+        setGeminiApiKey(data.config.geminiApiKey || '');
+      }
+    } catch (err) {
+      console.error('Failed to update AI config', err);
+    }
+  };
 
   const checkJiraStatus = async () => {
     try {
@@ -315,9 +351,18 @@ const App = () => {
           )}
         </div>
 
-        <div className="mt-auto pt-6 border-t border-slate-100 flex items-center justify-between">
-          <span className="text-xs text-slate-400 font-medium tracking-tight">v0.1.0-alpha</span>
-          <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+        <div className="mt-auto pt-6 border-t border-slate-100 space-y-4">
+          <button 
+            onClick={() => setShowSettings(true)}
+            className="flex items-center gap-3 w-full px-4 py-2 text-xs font-bold text-slate-400 uppercase tracking-widest hover:text-blue-600 transition-colors"
+          >
+            <Settings size={14} />
+            Settings
+          </button>
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-slate-400 font-medium tracking-tight">v0.1.0-alpha</span>
+            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+          </div>
         </div>
       </div>
 
@@ -582,6 +627,77 @@ const App = () => {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-8 animate-in fade-in zoom-in duration-200">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="w-12 h-12 bg-blue-100 rounded-2xl flex items-center justify-center">
+                <Settings className="text-blue-600" size={24} />
+              </div>
+              <div>
+                <h3 className="text-xl font-bold text-slate-800">Settings</h3>
+                <p className="text-sm text-slate-500 font-medium">Configure your AI preferences</p>
+              </div>
+            </div>
+
+            <div className="space-y-6 mb-8">
+              <div>
+                <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-3 px-1">AI Provider</label>
+                <div className="grid grid-cols-2 gap-3">
+                  <button
+                    onClick={() => updateAiConfig('local')}
+                    className={`flex items-center justify-center gap-2 py-3 rounded-xl border font-bold transition-all ${
+                      aiProvider === 'local' 
+                        ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-200' 
+                        : 'bg-white text-slate-600 border-slate-200 hover:border-blue-400'
+                    }`}
+                  >
+                    <Cpu size={18} />
+                    Local
+                  </button>
+                  <button
+                    onClick={() => updateAiConfig('gemini')}
+                    className={`flex items-center justify-center gap-2 py-3 rounded-xl border font-bold transition-all ${
+                      aiProvider === 'gemini' 
+                        ? 'bg-blue-600 text-white border-blue-600 shadow-md shadow-blue-200' 
+                        : 'bg-white text-slate-600 border-slate-200 hover:border-blue-400'
+                    }`}
+                  >
+                    <Sparkles size={18} />
+                    Gemini
+                  </button>
+                </div>
+              </div>
+
+              {aiProvider === 'gemini' && (
+                <div className="animate-in slide-in-from-top-2 duration-200">
+                  <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 px-1">Gemini API Key</label>
+                  <input 
+                    type="password" 
+                    value={geminiApiKey}
+                    onChange={(e) => setGeminiApiKey(e.target.value)}
+                    onBlur={(e) => updateAiConfig('gemini', e.target.value)}
+                    placeholder="Enter your API key..." 
+                    className="w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
+                  />
+                  <p className="mt-2 text-[10px] text-slate-400 px-1 font-medium leading-relaxed">
+                    Get a key from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">Google AI Studio</a>.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <button 
+              onClick={() => setShowSettings(false)}
+              className="w-full py-3.5 px-6 rounded-xl bg-slate-900 text-white font-bold hover:bg-slate-800 transition-all"
+            >
+              Done
+            </button>
           </div>
         </div>
       )}

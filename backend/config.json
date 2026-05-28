@@ -1,0 +1,10 @@
+{
+  "jira": {
+    "domain": "",
+    "email": ""
+  },
+  "ai": {
+    "provider": "gemini",
+    "_comment": "provider can be 'local' or 'gemini'"
+  }
+}

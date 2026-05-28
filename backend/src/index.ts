@@ -10,7 +10,31 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+const CONFIG_PATH = path.resolve(__dirname, '../config.json');
+
 const server = fastify({ logger: true });
+
+// Configuration Handlers
+const loadConfig = () => {
+  try {
+    if (fs.existsSync(CONFIG_PATH)) {
+      return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
+    }
+  } catch (err) {
+    console.error('Error loading config.json:', err);
+  }
+  return { jira: { domain: '', email: '' }, ai: { provider: 'local' } };
+};
+
+const saveConfig = (config: any) => {
+  try {
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
+  } catch (err) {
+    console.error('Error saving config.json:', err);
+  }
+};
+
+let appConfig = loadConfig();
 
 // Initialize Local Model
 let generator: any = null;
@@ -25,13 +49,18 @@ const initModel = async () => {
 };
 
 let jiraConfig = {
-  domain: process.env.JIRA_DOMAIN || '',
-  email: process.env.JIRA_EMAIL || '',
+  domain: appConfig.jira.domain || process.env.JIRA_DOMAIN || '',
+  email: appConfig.jira.email || process.env.JIRA_EMAIL || '',
   token: process.env.JIRA_API_TOKEN || '',
 };
 
 let githubConfig = {
   token: process.env.GITHUB_TOKEN || '',
+};
+
+let aiConfig = {
+  provider: appConfig.ai.provider || process.env.AI_PROVIDER || 'local',
+  geminiApiKey: process.env.GEMINI_API_KEY || '',
 };
 
 const updateEnvFile = (config: any) => {
@@ -53,12 +82,15 @@ const updateEnvFile = (config: any) => {
       });
     }
 
-    if (config.domain !== undefined) {
-      currentVars['JIRA_DOMAIN'] = config.domain;
-      currentVars['JIRA_EMAIL'] = config.email;
-      currentVars['JIRA_API_TOKEN'] = config.token;
-    } else if (config.token !== undefined) {
-      currentVars['GITHUB_TOKEN'] = config.token;
+    // Only save SENSITIVE tokens to .env
+    if (config.token !== undefined) {
+      if (config.domain !== undefined) {
+        currentVars['JIRA_API_TOKEN'] = config.token;
+      } else {
+        currentVars['GITHUB_TOKEN'] = config.token;
+      }
+    } else if (config.geminiApiKey !== undefined) {
+      currentVars['GEMINI_API_KEY'] = config.geminiApiKey;
     }
 
     const newContent = Object.entries(currentVars)
@@ -66,7 +98,7 @@ const updateEnvFile = (config: any) => {
       .join('\n');
 
     fs.writeFileSync(envPath, newContent);
-    console.log(`Credentials saved to ${envPath}`);
+    console.log(`Tokens saved to ${envPath}`);
   } catch (err) {
     console.error('Failed to update .env file:', err);
   }
@@ -101,7 +133,15 @@ server.post('/api/jira/connect', async (request, reply) => {
 
     if (response.status === 200) {
       jiraConfig = { domain, email, token };
+      
+      // Update config.json (public)
+      appConfig.jira.domain = domain;
+      appConfig.jira.email = email;
+      saveConfig(appConfig);
+
+      // Update .env (secret)
       updateEnvFile(jiraConfig);
+      
       return { success: true, user: response.data.displayName };
     }
   } catch (err: any) {
@@ -147,6 +187,11 @@ server.get('/api/jira/status', async (request, reply) => {
 
 server.post('/api/jira/disconnect', async (request, reply) => {
   jiraConfig = { domain: '', email: '', token: '' };
+  
+  appConfig.jira.domain = '';
+  appConfig.jira.email = '';
+  saveConfig(appConfig);
+  
   updateEnvFile(jiraConfig);
   return { success: true };
 });
@@ -176,6 +221,28 @@ server.post('/api/github/disconnect', async (request, reply) => {
   githubConfig = { token: '' };
   updateEnvFile(githubConfig);
   return { success: true };
+});
+
+// AI Configuration endpoints
+server.get('/api/ai/config', async (request, reply) => {
+  return aiConfig;
+});
+
+server.post('/api/ai/config', async (request, reply) => {
+  const { provider, geminiApiKey } = request.body as any;
+  
+  if (provider && ['local', 'gemini'].includes(provider)) {
+    aiConfig.provider = provider;
+    appConfig.ai.provider = provider;
+    saveConfig(appConfig);
+  }
+  
+  if (geminiApiKey !== undefined) {
+    aiConfig.geminiApiKey = geminiApiKey;
+    updateEnvFile({ geminiApiKey });
+  }
+
+  return { success: true, config: aiConfig };
 });
 
 server.get('/api/jira/issues', async (request, reply) => {
@@ -354,24 +421,35 @@ server.post('/api/chat', async (request, reply) => {
   }
 
   try {
-    const chatGenerator = await initModel();
-    
-    const messages = [
-      { role: 'user', content: fullPrompt },
-    ];
+    let responseText = '';
 
-    const output = await chatGenerator(messages, {
-      max_new_tokens: 256,
-      temperature: 0.7,
-      do_sample: true,
-    });
+    if (aiConfig.provider === 'gemini' && aiConfig.geminiApiKey) {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${aiConfig.geminiApiKey}`;
+      const response = await axios.post(url, {
+        contents: [{ parts: [{ text: fullPrompt }] }]
+      });
+      responseText = response.data.candidates[0].content.parts[0].text;
+    } else {
+      const chatGenerator = await initModel();
+      
+      const messages = [
+        { role: 'user', content: fullPrompt },
+      ];
 
-    const response = output[0].generated_text[output[0].generated_text.length - 1].content;
-    return { response };
+      const output = await chatGenerator(messages, {
+        max_new_tokens: 256,
+        temperature: 0.7,
+        do_sample: true,
+      });
+
+      responseText = output[0].generated_text[output[0].generated_text.length - 1].content;
+    }
+
+    return { response: responseText };
   } catch (err: any) {
-    console.error("Local Model Error:", err.message);
+    console.error("AI processing error:", err.message);
     server.log.error(err);
-    return reply.status(500).send({ error: 'Failed to get response from local AI' });
+    return reply.status(500).send({ error: `AI processing failed: ${err.message}` });
   }
 });
 
