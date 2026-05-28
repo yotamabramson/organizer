@@ -30,42 +30,43 @@ let jiraConfig = {
   token: process.env.JIRA_API_TOKEN || '',
 };
 
-const updateEnvFile = (config: typeof jiraConfig) => {
+let githubConfig = {
+  token: process.env.GITHUB_TOKEN || '',
+};
+
+const updateEnvFile = (config: any) => {
   try {
     const envPath = path.resolve(__dirname, '../.env');
-    let envContent = '';
+    let currentVars: Record<string, string> = {};
     
     if (fs.existsSync(envPath)) {
-      envContent = fs.readFileSync(envPath, 'utf8');
+      const envContent = fs.readFileSync(envPath, 'utf8');
+      envContent.split('\n').forEach(line => {
+        const parts = line.split('=');
+        if (parts.length >= 2) {
+          const key = parts[0]?.trim();
+          const value = parts.slice(1).join('=').trim();
+          if (key) {
+            currentVars[key] = value;
+          }
+        }
+      });
     }
 
-    const lines = envContent.split('\n');
-    let domainUpdated = false;
-    let emailUpdated = false;
-    let tokenUpdated = false;
+    if (config.domain !== undefined) {
+      currentVars['JIRA_DOMAIN'] = config.domain;
+      currentVars['JIRA_EMAIL'] = config.email;
+      currentVars['JIRA_API_TOKEN'] = config.token;
+    } else if (config.token !== undefined) {
+      currentVars['GITHUB_TOKEN'] = config.token;
+    }
 
-    const newLines = lines.map(line => {
-      if (line.startsWith('JIRA_DOMAIN=')) {
-        domainUpdated = true;
-        return `JIRA_DOMAIN=${config.domain}`;
-      }
-      if (line.startsWith('JIRA_EMAIL=')) {
-        emailUpdated = true;
-        return `JIRA_EMAIL=${config.email}`;
-      }
-      if (line.startsWith('JIRA_API_TOKEN=')) {
-        tokenUpdated = true;
-        return `JIRA_API_TOKEN=${config.token}`;
-      }
-      return line;
-    });
+    const newContent = Object.entries(currentVars)
+      .map(([key, value]) => `${key}=${value}`)
+      .join('\n');
 
-    if (!domainUpdated) newLines.push(`JIRA_DOMAIN=${config.domain}`);
-    if (!emailUpdated) newLines.push(`JIRA_EMAIL=${config.email}`);
-    if (!tokenUpdated) newLines.push(`JIRA_API_TOKEN=${config.token}`);
-
-    fs.writeFileSync(envPath, newLines.join('\n'));
-    console.log(`Jira credentials saved to ${envPath}`);
+    fs.writeFileSync(envPath, newContent);
+    console.log(`Credentials saved to ${envPath}`);
   } catch (err) {
     console.error('Failed to update .env file:', err);
   }
@@ -109,6 +110,32 @@ server.post('/api/jira/connect', async (request, reply) => {
   }
 });
 
+server.post('/api/github/connect', async (request, reply) => {
+  const { token } = request.body as any;
+
+  if (!token) {
+    return reply.status(400).send({ error: 'GitHub token is required' });
+  }
+
+  try {
+    const response = await axios.get('https://api.github.com/user', {
+      headers: {
+        'Authorization': `token ${token}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    });
+
+    if (response.status === 200) {
+      githubConfig = { token };
+      updateEnvFile(githubConfig);
+      return { success: true, user: response.data.login };
+    }
+  } catch (err: any) {
+    server.log.error(err);
+    return reply.status(401).send({ error: 'Failed to connect to GitHub. Check your token.' });
+  }
+});
+
 server.get('/api/jira/status', async (request, reply) => {
   const connected = !!(jiraConfig.domain && jiraConfig.email && jiraConfig.token);
   return { 
@@ -121,6 +148,17 @@ server.get('/api/jira/status', async (request, reply) => {
 server.post('/api/jira/disconnect', async (request, reply) => {
   jiraConfig = { domain: '', email: '', token: '' };
   updateEnvFile(jiraConfig);
+  return { success: true };
+});
+
+server.get('/api/github/status', async (request, reply) => {
+  const connected = !!githubConfig.token;
+  return { connected };
+});
+
+server.post('/api/github/disconnect', async (request, reply) => {
+  githubConfig = { token: '' };
+  updateEnvFile(githubConfig);
   return { success: true };
 });
 
@@ -174,9 +212,32 @@ server.get('/api/git/repos', async (request, reply) => {
 });
 
 server.get('/api/github/prs', async (request, reply) => {
-  return [
-    { id: 101, title: 'Add Tailwind support', author: 'copilot', url: '#' },
-  ];
+  if (!githubConfig.token) {
+    return [];
+  }
+
+  try {
+    const response = await axios.get('https://api.github.com/search/issues', {
+      params: {
+        q: 'is:open is:pr author:@me',
+      },
+      headers: {
+        'Authorization': `token ${githubConfig.token}`,
+        'Accept': 'application/vnd.github.v3+json'
+      }
+    });
+
+    return response.data.items.map((pr: any) => ({
+      id: pr.number,
+      title: pr.title,
+      author: pr.user.login,
+      url: pr.html_url,
+      repository: pr.repository_url.split('/').slice(-1)[0],
+    }));
+  } catch (err: any) {
+    server.log.error(err);
+    return [];
+  }
 });
 
 // LLM Chat endpoint using local Transformers.js execution
@@ -223,6 +284,35 @@ server.post('/api/chat', async (request, reply) => {
       }
     } catch (err) {
       server.log.error({ err }, "Failed to fetch Jira context for chat");
+    }
+  }
+
+  // 2. Fetch PRs if GitHub is connected
+  if (githubConfig.token) {
+    try {
+      const response = await axios.get('https://api.github.com/search/issues', {
+        params: {
+          q: 'is:open is:pr author:@me',
+        },
+        headers: {
+          'Authorization': `token ${githubConfig.token}`,
+          'Accept': 'application/vnd.github.v3+json'
+        }
+      });
+
+      const prs = response.data.items.map((pr: any) => `- [#${pr.number}] ${pr.title} (Repo: ${pr.repository_url.split('/').pop()})`);
+
+      if (prs.length > 0) {
+        const prContext = prs.join('\n');
+        // Handle case where Jira context was already added
+        if (fullPrompt.includes('Active Jira Tickets')) {
+          fullPrompt = fullPrompt.replace('\n\nUser Message:', `\n\nOpen GitHub Pull Requests:\n${prContext}\n\nUser Message:`);
+        } else {
+          fullPrompt = `You are a helpful assistant. Use the following GitHub context to help the user:\n\nOpen GitHub Pull Requests:\n${prContext}\n\nUser Message: ${message}`;
+        }
+      }
+    } catch (err) {
+      server.log.error('Failed to fetch GitHub context for chat');
     }
   }
 

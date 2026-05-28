@@ -1,11 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { 
   MessageSquare, 
   Ticket, 
   Hash, 
   GitBranch, 
   GitPullRequest, 
-  PlusCircle, 
   Send,
   Loader2,
   CheckCircle2
@@ -17,18 +16,33 @@ interface JiraIssue {
   status: string;
 }
 
+interface GithubPr {
+  id: number;
+  title: string;
+  author: string;
+  url: string;
+  repository: string;
+}
+
 const App = () => {
   const [messages, setMessages] = useState([
     { role: 'assistant', content: 'Hello! I am your organizer assistant. How can I help you today?' },
   ]);
   const [input, setInput] = useState('');
+  
   const [isJiraConnected, setIsJiraConnected] = useState(false);
   const [jiraIssues, setJiraIssues] = useState<JiraIssue[]>([]);
-  const [isConnecting, setIsConnecting] = useState(false);
   const [showJiraLogin, setShowJiraLogin] = useState(false);
   const [jiraToken, setJiraToken] = useState('');
   const [jiraEmail, setJiraEmail] = useState('');
   const [jiraDomain, setJiraDomain] = useState('');
+
+  const [isGithubConnected, setIsGithubConnected] = useState(false);
+  const [githubPrs, setGithubPrs] = useState<GithubPr[]>([]);
+  const [showGithubLogin, setShowGithubLogin] = useState(false);
+  const [githubToken, setGithubToken] = useState('');
+
+  const [isConnecting, setIsConnecting] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const API_BASE = 'http://localhost:3000/api';
@@ -43,6 +57,7 @@ const App = () => {
 
   useEffect(() => {
     checkJiraStatus();
+    checkGithubStatus();
   }, []);
 
   const checkJiraStatus = async () => {
@@ -57,6 +72,69 @@ const App = () => {
       }
     } catch (err) {
       console.error('Failed to check Jira status', err);
+    }
+  };
+
+  const checkGithubStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/github/status`);
+      const data = await res.json();
+      setIsGithubConnected(data.connected);
+      if (data.connected) {
+        fetchGithubPrs();
+      }
+    } catch (err) {
+      console.error('Failed to check GitHub status', err);
+    }
+  };
+
+  const handleGithubDisconnect = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/github/disconnect`, { method: 'POST' });
+      if (res.ok) {
+        setIsGithubConnected(false);
+        setGithubPrs([]);
+        setGithubToken('');
+        setShowGithubLogin(false);
+      }
+    } catch (err) {
+      console.error('Failed to disconnect GitHub', err);
+    }
+  };
+
+  const fetchGithubPrs = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/github/prs`);
+      if (res.ok) {
+        const data = await res.json();
+        setGithubPrs(data);
+      }
+    } catch (err) {
+      console.error('Failed to fetch GitHub PRs', err);
+    }
+  };
+
+  const handleGithubConnect = async () => {
+    setIsConnecting(true);
+    try {
+      const res = await fetch(`${API_BASE}/github/connect`, { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: githubToken })
+      });
+      if (res.ok) {
+        setIsGithubConnected(true);
+        setShowGithubLogin(false);
+        fetchGithubPrs();
+        setMessages(prev => [...prev, { role: 'assistant', content: 'Successfully connected to GitHub! I am now fetching your active pull requests.' }]);
+      } else {
+        const error = await res.json();
+        alert(error.error || 'Failed to connect');
+      }
+    } catch (err) {
+      console.error('Failed to connect to GitHub', err);
+    } finally {
+      setIsConnecting(false);
     }
   };
 
@@ -176,16 +254,22 @@ const App = () => {
                 Local Git
               </button>
 
-              <button className="flex items-center gap-3 w-full px-4 py-2.5 rounded-xl text-sm font-medium text-slate-600 border border-slate-200 hover:bg-slate-50 transition-all opacity-50 cursor-not-allowed">
+              <button 
+                onClick={() => isGithubConnected ? handleGithubDisconnect() : setShowGithubLogin(true)}
+                className={`flex items-center gap-3 w-full px-4 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                isGithubConnected 
+                  ? 'text-green-600 bg-green-50 border border-green-100 hover:bg-green-100' 
+                  : 'text-slate-600 border border-slate-200 hover:bg-slate-50'
+              }`}>
                 <GitPullRequest size={18} />
-                GitHub PRs
+                {isGithubConnected ? 'GitHub Connected' : 'GitHub PRs'}
               </button>
             </div>
           </div>
 
           {isJiraConnected && jiraIssues.length > 0 && (
             <div>
-              <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">Active Tickets</h2>
+              <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4 mt-6">Active Tickets</h2>
               <div className="space-y-2 max-h-64 overflow-y-auto pr-2">
                 {jiraIssues.map(issue => (
                   <div key={issue.id} className="p-3 bg-slate-50 rounded-lg border border-slate-100 text-xs">
@@ -195,6 +279,29 @@ const App = () => {
                       {issue.status}
                     </span>
                   </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {isGithubConnected && githubPrs.length > 0 && (
+            <div>
+              <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4 mt-6">Open PRs</h2>
+              <div className="space-y-2 max-h-64 overflow-y-auto pr-2">
+                {githubPrs.map(pr => (
+                  <a 
+                    key={pr.id} 
+                    href={pr.url} 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="block p-3 bg-slate-50 rounded-lg border border-slate-100 text-xs hover:bg-white hover:shadow-sm transition-all"
+                  >
+                    <span className="font-bold text-purple-600">#{pr.id}</span>
+                    <p className="mt-1 text-slate-700 truncate">{pr.title}</p>
+                    <span className="inline-block mt-2 px-1.5 py-0.5 bg-purple-100 rounded text-[10px] uppercase font-bold text-purple-600">
+                      {pr.repository}
+                    </span>
+                  </a>
                 ))}
               </div>
             </div>
@@ -372,6 +479,63 @@ const App = () => {
                 </div>
               </>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* GitHub Login Modal */}
+      {showGithubLogin && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-8 animate-in fade-in zoom-in duration-200">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="w-12 h-12 bg-purple-100 rounded-2xl flex items-center justify-center">
+                <GitPullRequest className="text-purple-600" size={24} />
+              </div>
+              <div>
+                <h3 className="text-xl font-bold text-slate-800">Connect GitHub</h3>
+                <p className="text-sm text-slate-500 font-medium">Link your account to see real PRs</p>
+              </div>
+            </div>
+
+            <div className="space-y-6 mb-8">
+              <div>
+                <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 px-1">Personal Access Token</label>
+                <input 
+                  type="password" 
+                  value={githubToken}
+                  onChange={(e) => setGithubToken(e.target.value)}
+                  placeholder="ghp_xxxxxxxxxxxx" 
+                  className="w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 font-medium"
+                />
+                <p className="mt-2 text-[10px] text-slate-400 px-1 font-medium leading-relaxed">
+                  Generate a token with <code className="bg-slate-100 px-1 rounded text-purple-600">repo</code> and <code className="bg-slate-100 px-1 rounded text-purple-600">read:user</code> scopes.
+                  <a 
+                    href="https://github.com/settings/tokens/new?scopes=repo,read:user&description=Organizer%20App" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="text-purple-600 hover:underline ml-1 font-bold"
+                  >
+                    Click here to create it.
+                  </a>
+                </p>
+              </div>
+            </div>
+
+            <div className="flex gap-3">
+              <button 
+                onClick={() => setShowGithubLogin(false)}
+                className="flex-1 py-3.5 px-6 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-50 transition-colors"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleGithubConnect}
+                disabled={isConnecting}
+                className="flex-1 py-3.5 px-6 rounded-xl bg-purple-600 text-white font-bold hover:bg-purple-700 transition-all flex items-center justify-center gap-2 disabled:opacity-70"
+              >
+                {isConnecting ? <Loader2 className="animate-spin" size={18} /> : 'Connect Token'}
+              </button>
+            </div>
           </div>
         </div>
       )}
