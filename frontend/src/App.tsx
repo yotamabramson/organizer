@@ -50,9 +50,29 @@ const App = () => {
       const res = await fetch(`${API_BASE}/jira/status`);
       const data = await res.json();
       setIsJiraConnected(data.connected);
-      if (data.connected) fetchJiraIssues();
+      if (data.connected) {
+        setJiraDomain(data.domain || '');
+        setJiraEmail(data.email || '');
+        fetchJiraIssues();
+      }
     } catch (err) {
       console.error('Failed to check Jira status', err);
+    }
+  };
+
+  const handleJiraDisconnect = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/jira/disconnect`, { method: 'POST' });
+      if (res.ok) {
+        setIsJiraConnected(false);
+        setJiraIssues([]);
+        setJiraDomain('');
+        setJiraEmail('');
+        setJiraToken('');
+        setShowJiraLogin(false);
+      }
+    } catch (err) {
+      console.error('Failed to disconnect Jira', err);
     }
   };
 
@@ -132,7 +152,7 @@ const App = () => {
             <h2 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4">Integrations</h2>
             <div className="space-y-2">
               <button
-                onClick={() => isJiraConnected ? null : setShowJiraLogin(true)}
+                onClick={() => setShowJiraLogin(true)}
                 className={`flex items-center justify-between w-full px-4 py-2.5 rounded-xl text-sm font-medium transition-all ${
                   isJiraConnected 
                     ? 'bg-blue-50 text-blue-700 border border-blue-100' 
@@ -248,69 +268,110 @@ const App = () => {
               <div className="p-3 bg-blue-50 rounded-2xl">
                 <Ticket className="text-blue-600" size={24} />
               </div>
-              <h3 className="text-xl font-bold text-slate-800">Connect to Jira</h3>
+              <h3 className="text-xl font-bold text-slate-800">
+                {isJiraConnected ? 'Jira Connection' : 'Connect to Jira'}
+              </h3>
             </div>
             
-            <p className="text-slate-500 mb-8 text-sm leading-relaxed font-medium">
-              To fetch your tickets, Organizer needs an API Token and your Site URL. 
-              <a 
-                href="https://id.atlassian.com/manage-profile/security/api-tokens" 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="text-blue-600 hover:underline ml-1"
-              >
-                Click here to generate a token.
-              </a>
-            </p>
+            {isJiraConnected ? (
+              <div className="space-y-6">
+                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Site URL</label>
+                    <p className="text-sm font-semibold text-slate-700">{jiraDomain}</p>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Account</label>
+                    <p className="text-sm font-semibold text-slate-700">{jiraEmail}</p>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Status</label>
+                    <div className="flex items-center gap-1.5 text-green-600 font-bold text-sm">
+                      <CheckCircle2 size={14} />
+                      Connected
+                    </div>
+                  </div>
+                </div>
 
-            <div className="space-y-4 mb-8">
-              <div>
-                <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 px-1">Site URL</label>
-                <input 
-                  type="text" 
-                  value={jiraDomain}
-                  onChange={(e) => setJiraDomain(e.target.value)}
-                  placeholder="your-domain.atlassian.net" 
-                  className="w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
-                />
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => setShowJiraLogin(false)}
+                    className="flex-1 py-3.5 px-6 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-50 transition-colors"
+                  >
+                    Close
+                  </button>
+                  <button 
+                    onClick={handleJiraDisconnect}
+                    className="flex-1 py-3.5 px-6 rounded-xl bg-red-50 text-red-600 font-bold hover:bg-red-100 transition-all border border-red-100"
+                  >
+                    Disconnect
+                  </button>
+                </div>
               </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 px-1">Atlassian Email</label>
-                <input 
-                  type="email" 
-                  value={jiraEmail}
-                  onChange={(e) => setJiraEmail(e.target.value)}
-                  placeholder="email@example.com" 
-                  className="w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 px-1">API Token</label>
-                <input 
-                  type="password" 
-                  value={jiraToken}
-                  onChange={(e) => setJiraToken(e.target.value)}
-                  placeholder="Enter token..." 
-                  className="w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
-                />
-              </div>
-            </div>
+            ) : (
+              <>
+                <p className="text-slate-500 mb-8 text-sm leading-relaxed font-medium">
+                  To fetch your tickets, Organizer needs an API Token and your Site URL. 
+                  <a 
+                    href="https://id.atlassian.com/manage-profile/security/api-tokens" 
+                    target="_blank" 
+                    rel="noopener noreferrer"
+                    className="text-blue-600 hover:underline ml-1"
+                  >
+                    Click here to generate a token.
+                  </a>
+                </p>
 
-            <div className="flex gap-3">
-              <button 
-                onClick={() => setShowJiraLogin(false)}
-                className="flex-1 py-3.5 px-6 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-50 transition-colors"
-              >
-                Cancel
-              </button>
-              <button 
-                onClick={handleJiraConnect}
-                disabled={isConnecting}
-                className="flex-1 py-3.5 px-6 rounded-xl bg-blue-600 text-white font-bold hover:bg-blue-700 transition-all flex items-center justify-center gap-2 disabled:opacity-70"
-              >
-                {isConnecting ? <Loader2 className="animate-spin" size={18} /> : 'Connect'}
-              </button>
-            </div>
+                <div className="space-y-4 mb-8">
+                  <div>
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 px-1">Site URL</label>
+                    <input 
+                      type="text" 
+                      value={jiraDomain}
+                      onChange={(e) => setJiraDomain(e.target.value)}
+                      placeholder="your-domain.atlassian.net" 
+                      className="w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 px-1">Atlassian Email</label>
+                    <input 
+                      type="email" 
+                      value={jiraEmail}
+                      onChange={(e) => setJiraEmail(e.target.value)}
+                      placeholder="email@example.com" 
+                      className="w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest mb-2 px-1">API Token</label>
+                    <input 
+                      type="password" 
+                      value={jiraToken}
+                      onChange={(e) => setJiraToken(e.target.value)}
+                      placeholder="Enter token..." 
+                      className="w-full px-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 font-medium"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex gap-3">
+                  <button 
+                    onClick={() => setShowJiraLogin(false)}
+                    className="flex-1 py-3.5 px-6 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    onClick={handleJiraConnect}
+                    disabled={isConnecting}
+                    className="flex-1 py-3.5 px-6 rounded-xl bg-blue-600 text-white font-bold hover:bg-blue-700 transition-all flex items-center justify-center gap-2 disabled:opacity-70"
+                  >
+                    {isConnecting ? <Loader2 className="animate-spin" size={18} /> : 'Connect'}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

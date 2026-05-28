@@ -3,6 +3,12 @@ import cors from '@fastify/cors';
 import axios from 'axios';
 import 'dotenv/config';
 import { pipeline } from "@huggingface/transformers";
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const server = fastify({ logger: true });
 
@@ -22,6 +28,47 @@ let jiraConfig = {
   domain: process.env.JIRA_DOMAIN || '',
   email: process.env.JIRA_EMAIL || '',
   token: process.env.JIRA_API_TOKEN || '',
+};
+
+const updateEnvFile = (config: typeof jiraConfig) => {
+  try {
+    const envPath = path.resolve(__dirname, '../.env');
+    let envContent = '';
+    
+    if (fs.existsSync(envPath)) {
+      envContent = fs.readFileSync(envPath, 'utf8');
+    }
+
+    const lines = envContent.split('\n');
+    let domainUpdated = false;
+    let emailUpdated = false;
+    let tokenUpdated = false;
+
+    const newLines = lines.map(line => {
+      if (line.startsWith('JIRA_DOMAIN=')) {
+        domainUpdated = true;
+        return `JIRA_DOMAIN=${config.domain}`;
+      }
+      if (line.startsWith('JIRA_EMAIL=')) {
+        emailUpdated = true;
+        return `JIRA_EMAIL=${config.email}`;
+      }
+      if (line.startsWith('JIRA_API_TOKEN=')) {
+        tokenUpdated = true;
+        return `JIRA_API_TOKEN=${config.token}`;
+      }
+      return line;
+    });
+
+    if (!domainUpdated) newLines.push(`JIRA_DOMAIN=${config.domain}`);
+    if (!emailUpdated) newLines.push(`JIRA_EMAIL=${config.email}`);
+    if (!tokenUpdated) newLines.push(`JIRA_API_TOKEN=${config.token}`);
+
+    fs.writeFileSync(envPath, newLines.join('\n'));
+    console.log(`Jira credentials saved to ${envPath}`);
+  } catch (err) {
+    console.error('Failed to update .env file:', err);
+  }
 };
 
 server.register(cors, {
@@ -53,6 +100,7 @@ server.post('/api/jira/connect', async (request, reply) => {
 
     if (response.status === 200) {
       jiraConfig = { domain, email, token };
+      updateEnvFile(jiraConfig);
       return { success: true, user: response.data.displayName };
     }
   } catch (err: any) {
@@ -63,7 +111,17 @@ server.post('/api/jira/connect', async (request, reply) => {
 
 server.get('/api/jira/status', async (request, reply) => {
   const connected = !!(jiraConfig.domain && jiraConfig.email && jiraConfig.token);
-  return { connected };
+  return { 
+    connected,
+    domain: jiraConfig.domain,
+    email: jiraConfig.email
+  };
+});
+
+server.post('/api/jira/disconnect', async (request, reply) => {
+  jiraConfig = { domain: '', email: '', token: '' };
+  updateEnvFile(jiraConfig);
+  return { success: true };
 });
 
 server.get('/api/jira/issues', async (request, reply) => {
