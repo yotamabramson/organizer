@@ -6,6 +6,7 @@ import { pipeline } from "@huggingface/transformers";
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import crypto from 'crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,6 +37,23 @@ const saveConfig = (config: any) => {
 
 let appConfig = loadConfig();
 
+if (!appConfig.jira) {
+  appConfig.jira = { domain: '', email: '' };
+}
+
+if (!appConfig.ai) {
+  appConfig.ai = { provider: 'local' };
+}
+
+if (!appConfig.atlassian) {
+  appConfig.atlassian = {
+    accountId: '',
+    displayName: '',
+    email: '',
+    sites: [],
+  };
+}
+
 // Initialize Local Model
 let generator: any = null;
 
@@ -62,6 +80,18 @@ let aiConfig = {
   provider: appConfig.ai.provider || process.env.AI_PROVIDER || 'local',
   geminiApiKey: process.env.GEMINI_API_KEY || '',
 };
+
+let atlassianConfig = {
+  clientId: process.env.ATLASSIAN_CLIENT_ID || 'M5cfpggtCaLQLp6wHFxoGN0t6zmYBPgJ',
+  clientSecret: process.env.ATLASSIAN_CLIENT_SECRET || '',
+  redirectUri: process.env.ATLASSIAN_REDIRECT_URI || 'http://localhost:3000/api/auth/callback',
+  frontendRedirectUri: process.env.ATLASSIAN_FRONTEND_REDIRECT_URI || 'http://localhost:5173',
+  accessToken: process.env.ATLASSIAN_ACCESS_TOKEN || '',
+  refreshToken: process.env.ATLASSIAN_REFRESH_TOKEN || '',
+  tokenExpiresAt: Number(process.env.ATLASSIAN_TOKEN_EXPIRES_AT || 0),
+};
+
+const atlassianOAuthStates = new Map<string, number>();
 
 const updateEnvFile = (config: any) => {
   try {
@@ -91,6 +121,10 @@ const updateEnvFile = (config: any) => {
       }
     } else if (config.geminiApiKey !== undefined) {
       currentVars['GEMINI_API_KEY'] = config.geminiApiKey;
+    } else if (config.atlassianAccessToken !== undefined) {
+      currentVars['ATLASSIAN_ACCESS_TOKEN'] = config.atlassianAccessToken;
+      currentVars['ATLASSIAN_REFRESH_TOKEN'] = config.atlassianRefreshToken || '';
+      currentVars['ATLASSIAN_TOKEN_EXPIRES_AT'] = String(config.atlassianTokenExpiresAt || 0);
     }
 
     const newContent = Object.entries(currentVars)
@@ -220,6 +254,175 @@ server.get('/api/github/status', async (request, reply) => {
 server.post('/api/github/disconnect', async (request, reply) => {
   githubConfig = { token: '' };
   updateEnvFile(githubConfig);
+  return { success: true };
+});
+
+server.get('/api/atlassian/status', async (request, reply) => {
+  const connected = !!atlassianConfig.accessToken;
+  const configured = !!(atlassianConfig.clientId && atlassianConfig.clientSecret && atlassianConfig.redirectUri);
+
+  return {
+    connected,
+    configured,
+    displayName: appConfig.atlassian?.displayName || '',
+    email: appConfig.atlassian?.email || '',
+    sites: appConfig.atlassian?.sites || [],
+  };
+});
+
+server.get('/api/atlassian/oauth/start', async (request, reply) => {
+  if (!atlassianConfig.clientId || !atlassianConfig.clientSecret || !atlassianConfig.redirectUri) {
+    return reply.status(400).send({
+      error: 'Atlassian OAuth is not configured. Set ATLASSIAN_CLIENT_ID, ATLASSIAN_CLIENT_SECRET, and ATLASSIAN_REDIRECT_URI in backend/.env',
+    });
+  }
+
+  const state = crypto.randomBytes(16).toString('hex');
+  atlassianOAuthStates.set(state, Date.now() + 10 * 60 * 1000);
+
+  const authUrl = new URL('https://auth.atlassian.com/authorize');
+  authUrl.searchParams.set('audience', 'api.atlassian.com');
+  authUrl.searchParams.set('client_id', atlassianConfig.clientId);
+  authUrl.searchParams.set('scope', 'read:jira-work');
+  authUrl.searchParams.set('redirect_uri', atlassianConfig.redirectUri);
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('prompt', 'consent');
+  authUrl.searchParams.set('state', state);
+
+  return { url: authUrl.toString() };
+});
+
+const handleAtlassianCallback = async (code?: string, state?: string) => {
+  if (!code || !state) {
+    return { ok: false, reason: 'missing_code_or_state' };
+  }
+
+  const expiresAt = atlassianOAuthStates.get(state);
+  atlassianOAuthStates.delete(state);
+
+  if (!expiresAt || expiresAt < Date.now()) {
+    return { ok: false, reason: 'invalid_or_expired_state' };
+  }
+
+  try {
+    const tokenResponse = await axios.post('https://auth.atlassian.com/oauth/token', {
+      grant_type: 'authorization_code',
+      client_id: atlassianConfig.clientId,
+      client_secret: atlassianConfig.clientSecret,
+      code,
+      redirect_uri: atlassianConfig.redirectUri,
+    }, {
+      headers: {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+      },
+    });
+
+    const accessToken = tokenResponse.data.access_token || '';
+    const refreshToken = tokenResponse.data.refresh_token || '';
+    const tokenExpiresAt = Date.now() + (Number(tokenResponse.data.expires_in || 3600) * 1000);
+
+    let meData: any = {};
+    let resourcesData: any[] = [];
+
+    try {
+      const meResponse = await axios.get('https://api.atlassian.com/me', {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Accept': 'application/json',
+        },
+      });
+      meData = meResponse.data || {};
+    } catch (err) {
+      server.log.warn({ err }, 'Atlassian /me fetch failed; continuing with token only');
+    }
+
+    try {
+      const resourcesResponse = await axios.get('https://api.atlassian.com/oauth/token/accessible-resources', {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Accept': 'application/json',
+        },
+      });
+      resourcesData = Array.isArray(resourcesResponse.data) ? resourcesResponse.data : [];
+    } catch (err) {
+      server.log.warn({ err }, 'Atlassian accessible-resources fetch failed; continuing with token only');
+    }
+
+    atlassianConfig.accessToken = accessToken;
+    atlassianConfig.refreshToken = refreshToken;
+    atlassianConfig.tokenExpiresAt = tokenExpiresAt;
+
+    appConfig.atlassian = {
+      accountId: meData.account_id || '',
+      displayName: meData.name || meData.nickname || '',
+      email: meData.email || '',
+      sites: resourcesData.map((r: any) => ({
+            id: r.id,
+            name: r.name,
+            url: r.url,
+          })),
+    };
+    saveConfig(appConfig);
+
+    updateEnvFile({
+      atlassianAccessToken: accessToken,
+      atlassianRefreshToken: refreshToken,
+      atlassianTokenExpiresAt: tokenExpiresAt,
+    });
+
+    return { ok: true };
+  } catch (err) {
+    server.log.error(err);
+    return { ok: false, reason: 'oauth_exchange_failed' };
+  }
+};
+
+server.get('/api/auth/callback', async (request, reply) => {
+  const { code, state } = request.query as { code?: string; state?: string };
+  const result = await handleAtlassianCallback(code, state);
+
+  const url = new URL(atlassianConfig.frontendRedirectUri);
+  url.searchParams.set('atlassian_oauth', result.ok ? 'success' : 'error');
+  if (!result.ok && result.reason) {
+    url.searchParams.set('reason', result.reason);
+  }
+
+  return reply.redirect(url.toString());
+});
+
+server.get('/api/atlassian/oauth/callback', async (request, reply) => {
+  const { code, state } = request.query as { code?: string; state?: string };
+  const result = await handleAtlassianCallback(code, state);
+
+  const url = new URL(atlassianConfig.frontendRedirectUri);
+  url.searchParams.set('atlassian_oauth', result.ok ? 'success' : 'error');
+  if (!result.ok && result.reason) {
+    url.searchParams.set('reason', result.reason);
+  }
+
+  return reply.redirect(url.toString());
+});
+
+server.post('/api/atlassian/disconnect', async (request, reply) => {
+  atlassianConfig.accessToken = '';
+  atlassianConfig.refreshToken = '';
+  atlassianConfig.tokenExpiresAt = 0;
+
+  appConfig.atlassian = {
+    accountId: '',
+    displayName: '',
+    email: '',
+    sites: [],
+  };
+  saveConfig(appConfig);
+
+  updateEnvFile({
+    atlassianAccessToken: '',
+    atlassianRefreshToken: '',
+    atlassianTokenExpiresAt: 0,
+  });
+
   return { success: true };
 });
 

@@ -27,6 +27,12 @@ interface GithubPr {
   repository: string;
 }
 
+interface AtlassianSite {
+  id: string;
+  name: string;
+  url: string;
+}
+
 const App = () => {
   const [messages, setMessages] = useState([
     { role: 'assistant', content: 'Hello! I am your organizer assistant. How can I help you today?' },
@@ -45,6 +51,13 @@ const App = () => {
   const [showGithubLogin, setShowGithubLogin] = useState(false);
   const [githubToken, setGithubToken] = useState('');
   const [githubUsername, setGithubUsername] = useState('');
+
+  const [isAtlassianConnected, setIsAtlassianConnected] = useState(false);
+  const [isAtlassianConfigured, setIsAtlassianConfigured] = useState(false);
+  const [showAtlassianLogin, setShowAtlassianLogin] = useState(false);
+  const [atlassianDisplayName, setAtlassianDisplayName] = useState('');
+  const [atlassianEmail, setAtlassianEmail] = useState('');
+  const [atlassianSites, setAtlassianSites] = useState<AtlassianSite[]>([]);
 
   const [aiProvider, setAiProvider] = useState('local');
   const [geminiApiKey, setGeminiApiKey] = useState('');
@@ -66,7 +79,21 @@ const App = () => {
   useEffect(() => {
     checkJiraStatus();
     checkGithubStatus();
+    checkAtlassianStatus();
     fetchAiConfig();
+
+    const params = new URLSearchParams(window.location.search);
+    const oauthStatus = params.get('atlassian_oauth');
+
+    if (oauthStatus === 'success') {
+      setMessages(prev => [...prev, { role: 'assistant', content: 'Atlassian OAuth connected successfully. You can now use Jira and Bitbucket scopes through Atlassian.' }]);
+      checkAtlassianStatus();
+      window.history.replaceState({}, '', window.location.pathname);
+    } else if (oauthStatus === 'error') {
+      const reason = params.get('reason') || 'unknown_error';
+      alert(`Atlassian OAuth failed: ${reason}`);
+      window.history.replaceState({}, '', window.location.pathname);
+    }
   }, []);
 
   const fetchAiConfig = async () => {
@@ -123,6 +150,53 @@ const App = () => {
       }
     } catch (err) {
       console.error('Failed to check GitHub status', err);
+    }
+  };
+
+  const checkAtlassianStatus = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/atlassian/status`);
+      const data = await res.json();
+      setIsAtlassianConnected(data.connected);
+      setIsAtlassianConfigured(data.configured);
+      setAtlassianDisplayName(data.displayName || '');
+      setAtlassianEmail(data.email || '');
+      setAtlassianSites(data.sites || []);
+    } catch (err) {
+      console.error('Failed to check Atlassian status', err);
+    }
+  };
+
+  const handleAtlassianConnect = async () => {
+    setIsConnecting(true);
+    try {
+      const res = await fetch(`${API_BASE}/atlassian/oauth/start`);
+      const data = await res.json();
+      if (res.ok && data.url) {
+        window.location.href = data.url;
+        return;
+      }
+      alert(data.error || 'Failed to start Atlassian OAuth');
+    } catch (err) {
+      console.error('Failed to start Atlassian OAuth', err);
+      alert('Failed to start Atlassian OAuth');
+    } finally {
+      setIsConnecting(false);
+    }
+  };
+
+  const handleAtlassianDisconnect = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/atlassian/disconnect`, { method: 'POST' });
+      if (res.ok) {
+        setIsAtlassianConnected(false);
+        setAtlassianDisplayName('');
+        setAtlassianEmail('');
+        setAtlassianSites([]);
+        setShowAtlassianLogin(false);
+      }
+    } catch (err) {
+      console.error('Failed to disconnect Atlassian OAuth', err);
     }
   };
 
@@ -289,9 +363,19 @@ const App = () => {
                 Slack
               </button>
               
-              <button className="flex items-center gap-3 w-full px-4 py-2.5 rounded-xl text-sm font-medium text-slate-600 border border-slate-200 hover:bg-slate-50 transition-all opacity-50 cursor-not-allowed">
-                <GitBranch size={18} />
-                Local Git
+              <button
+                onClick={() => setShowAtlassianLogin(true)}
+                className={`flex items-center justify-between w-full px-4 py-2.5 rounded-xl text-sm font-medium transition-all ${
+                  isAtlassianConnected
+                    ? 'bg-cyan-50 text-cyan-700 border border-cyan-100'
+                    : 'bg-white text-slate-600 border border-slate-200 hover:border-cyan-400 hover:text-cyan-700'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <GitBranch size={18} className={isAtlassianConnected ? 'text-cyan-600' : ''} />
+                  Atlassian OAuth
+                </div>
+                {isAtlassianConnected && <CheckCircle2 size={16} className="text-cyan-600" />}
               </button>
 
               <button 
@@ -623,6 +707,96 @@ const App = () => {
                     className="flex-1 py-3.5 px-6 rounded-xl bg-purple-600 text-white font-bold hover:bg-purple-700 transition-all flex items-center justify-center gap-2 disabled:opacity-70"
                   >
                     {isConnecting ? <Loader2 className="animate-spin" size={18} /> : 'Connect Token'}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Atlassian OAuth Modal */}
+      {showAtlassianLogin && (
+        <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-6">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-md p-8 animate-in fade-in zoom-in duration-200">
+            <div className="flex items-center gap-4 mb-8">
+              <div className="w-12 h-12 bg-cyan-100 rounded-2xl flex items-center justify-center">
+                <GitBranch className="text-cyan-600" size={24} />
+              </div>
+              <div>
+                <h3 className="text-xl font-bold text-slate-800">
+                  {isAtlassianConnected ? 'Atlassian OAuth Connection' : 'Connect Atlassian OAuth'}
+                </h3>
+                <p className="text-sm text-slate-500 font-medium">
+                  {isAtlassianConnected ? 'Connected with Jira + Bitbucket scopes' : 'Authorize once for Jira and Bitbucket access'}
+                </p>
+              </div>
+            </div>
+
+            {isAtlassianConnected ? (
+              <div className="space-y-6">
+                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-3">
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Atlassian Account</label>
+                    <p className="text-sm font-semibold text-slate-700">{atlassianDisplayName || 'Connected Account'}</p>
+                    {atlassianEmail && <p className="text-xs text-slate-500 mt-1">{atlassianEmail}</p>}
+                  </div>
+                  <div>
+                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Status</label>
+                    <div className="flex items-center gap-1.5 text-cyan-600 font-bold text-sm">
+                      <CheckCircle2 size={14} />
+                      Connected
+                    </div>
+                  </div>
+                  {atlassianSites.length > 0 && (
+                    <div>
+                      <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Accessible Sites</label>
+                      <p className="text-xs text-slate-600">{atlassianSites.map(site => site.name).join(', ')}</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowAtlassianLogin(false)}
+                    className="flex-1 py-3.5 px-6 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-50 transition-colors"
+                  >
+                    Close
+                  </button>
+                  <button
+                    onClick={handleAtlassianDisconnect}
+                    className="flex-1 py-3.5 px-6 rounded-xl bg-red-50 text-red-600 font-bold hover:bg-red-100 transition-all border border-red-100"
+                  >
+                    Disconnect
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <p className="text-slate-500 mb-8 text-sm leading-relaxed font-medium">
+                  This adds Atlassian OAuth 2.0 on top of your existing Jira API token flow.
+                  It grants access to Jira scopes and Bitbucket scopes in one authorization.
+                </p>
+
+                {!isAtlassianConfigured && (
+                  <div className="mb-6 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-xs font-medium">
+                    Missing backend OAuth configuration. Set <span className="font-bold">ATLASSIAN_CLIENT_ID</span>, <span className="font-bold">ATLASSIAN_CLIENT_SECRET</span>, and <span className="font-bold">ATLASSIAN_REDIRECT_URI</span> in backend/.env.
+                  </div>
+                )}
+
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => setShowAtlassianLogin(false)}
+                    className="flex-1 py-3.5 px-6 rounded-xl border border-slate-200 text-slate-600 font-bold hover:bg-slate-50 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleAtlassianConnect}
+                    disabled={isConnecting || !isAtlassianConfigured}
+                    className="flex-1 py-3.5 px-6 rounded-xl bg-cyan-600 text-white font-bold hover:bg-cyan-700 transition-all flex items-center justify-center gap-2 disabled:opacity-70"
+                  >
+                    {isConnecting ? <Loader2 className="animate-spin" size={18} /> : 'Authorize'}
                   </button>
                 </div>
               </>
