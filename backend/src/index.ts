@@ -54,6 +54,14 @@ if (!appConfig.atlassian) {
   };
 }
 
+if (!appConfig.bitbucket) {
+  appConfig.bitbucket = {
+    username: '',
+    displayName: '',
+    workspaces: [],
+  };
+}
+
 // Initialize Local Model
 let generator: any = null;
 
@@ -91,7 +99,18 @@ let atlassianConfig = {
   tokenExpiresAt: Number(process.env.ATLASSIAN_TOKEN_EXPIRES_AT || 0),
 };
 
+let bitbucketConfig = {
+  clientId: process.env.BITBUCKET_CLIENT_ID || '4F4weJ5N6nv6jkhSS3',
+  clientSecret: process.env.BITBUCKET_CLIENT_SECRET || 'b2qYjDyE4Fz8Zwy9t3R5QY4Bfxs3Cyvp',
+  redirectUri: process.env.BITBUCKET_REDIRECT_URI || 'http://localhost:3000/api/auth/bitbucket/callback',
+  frontendRedirectUri: process.env.BITBUCKET_FRONTEND_REDIRECT_URI || 'http://localhost:5173',
+  accessToken: process.env.BITBUCKET_ACCESS_TOKEN || '',
+  refreshToken: process.env.BITBUCKET_REFRESH_TOKEN || '',
+  tokenExpiresAt: Number(process.env.BITBUCKET_TOKEN_EXPIRES_AT || 0),
+};
+
 const atlassianOAuthStates = new Map<string, number>();
+const bitbucketOAuthStates = new Map<string, number>();
 
 const updateEnvFile = (config: any) => {
   try {
@@ -125,6 +144,10 @@ const updateEnvFile = (config: any) => {
       currentVars['ATLASSIAN_ACCESS_TOKEN'] = config.atlassianAccessToken;
       currentVars['ATLASSIAN_REFRESH_TOKEN'] = config.atlassianRefreshToken || '';
       currentVars['ATLASSIAN_TOKEN_EXPIRES_AT'] = String(config.atlassianTokenExpiresAt || 0);
+    } else if (config.bitbucketAccessToken !== undefined) {
+      currentVars['BITBUCKET_ACCESS_TOKEN'] = config.bitbucketAccessToken;
+      currentVars['BITBUCKET_REFRESH_TOKEN'] = config.bitbucketRefreshToken || '';
+      currentVars['BITBUCKET_TOKEN_EXPIRES_AT'] = String(config.bitbucketTokenExpiresAt || 0);
     }
 
     const newContent = Object.entries(currentVars)
@@ -421,6 +444,152 @@ server.post('/api/atlassian/disconnect', async (request, reply) => {
     atlassianAccessToken: '',
     atlassianRefreshToken: '',
     atlassianTokenExpiresAt: 0,
+  });
+
+  return { success: true };
+});
+
+server.get('/api/bitbucket/status', async (request, reply) => {
+  const connected = !!bitbucketConfig.accessToken;
+  const configured = !!(bitbucketConfig.clientId && bitbucketConfig.clientSecret && bitbucketConfig.redirectUri);
+
+  return {
+    connected,
+    configured,
+    username: appConfig.bitbucket?.username || '',
+    displayName: appConfig.bitbucket?.displayName || '',
+    workspaces: appConfig.bitbucket?.workspaces || [],
+  };
+});
+
+server.get('/api/bitbucket/oauth/start', async (request, reply) => {
+  if (!bitbucketConfig.clientId || !bitbucketConfig.clientSecret || !bitbucketConfig.redirectUri) {
+    return reply.status(400).send({
+      error: 'Bitbucket OAuth is not configured. Set BITBUCKET_CLIENT_ID, BITBUCKET_CLIENT_SECRET, and BITBUCKET_REDIRECT_URI in backend/.env',
+    });
+  }
+
+  const state = crypto.randomBytes(16).toString('hex');
+  bitbucketOAuthStates.set(state, Date.now() + 10 * 60 * 1000);
+
+  const authUrl = new URL('https://bitbucket.org/site/oauth2/authorize');
+  authUrl.searchParams.set('client_id', bitbucketConfig.clientId);
+  authUrl.searchParams.set('response_type', 'code');
+  authUrl.searchParams.set('redirect_uri', bitbucketConfig.redirectUri);
+  authUrl.searchParams.set('state', state);
+
+  return { url: authUrl.toString() };
+});
+
+server.get('/api/auth/bitbucket/callback', async (request, reply) => {
+  const { code, state } = request.query as { code?: string; state?: string };
+
+  const redirectWithStatus = (status: string, reason?: string) => {
+    const url = new URL(bitbucketConfig.frontendRedirectUri);
+    url.searchParams.set('bitbucket_oauth', status);
+    if (reason) url.searchParams.set('reason', reason);
+    return reply.redirect(url.toString());
+  };
+
+  if (!code || !state) {
+    return redirectWithStatus('error', 'missing_code_or_state');
+  }
+
+  const expiresAt = bitbucketOAuthStates.get(state);
+  bitbucketOAuthStates.delete(state);
+
+  if (!expiresAt || expiresAt < Date.now()) {
+    return redirectWithStatus('error', 'invalid_or_expired_state');
+  }
+
+  try {
+    const basicAuth = Buffer.from(`${bitbucketConfig.clientId}:${bitbucketConfig.clientSecret}`).toString('base64');
+    const body = new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: bitbucketConfig.redirectUri,
+    }).toString();
+
+    const tokenResponse = await axios.post('https://bitbucket.org/site/oauth2/access_token', body, {
+      headers: {
+        'Authorization': `Basic ${basicAuth}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+    });
+
+    const accessToken = tokenResponse.data.access_token || '';
+    const refreshToken = tokenResponse.data.refresh_token || '';
+    const tokenExpiresAt = Date.now() + (Number(tokenResponse.data.expires_in || 3600) * 1000);
+
+    let userData: any = {};
+    let workspaceNames: string[] = [];
+
+    try {
+      const userResponse = await axios.get('https://api.bitbucket.org/2.0/user', {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Accept': 'application/json',
+        },
+      });
+      userData = userResponse.data || {};
+    } catch (err) {
+      server.log.warn({ err }, 'Bitbucket user fetch failed; continuing with token only');
+    }
+
+    try {
+      const workspaceResponse = await axios.get('https://api.bitbucket.org/2.0/workspaces?role=member', {
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Accept': 'application/json',
+        },
+      });
+      workspaceNames = Array.isArray(workspaceResponse.data?.values)
+        ? workspaceResponse.data.values.map((w: any) => w.name || w.slug).filter(Boolean)
+        : [];
+    } catch (err) {
+      server.log.warn({ err }, 'Bitbucket workspace fetch failed; continuing with token only');
+    }
+
+    bitbucketConfig.accessToken = accessToken;
+    bitbucketConfig.refreshToken = refreshToken;
+    bitbucketConfig.tokenExpiresAt = tokenExpiresAt;
+
+    appConfig.bitbucket = {
+      username: userData.username || '',
+      displayName: userData.display_name || '',
+      workspaces: workspaceNames,
+    };
+    saveConfig(appConfig);
+
+    updateEnvFile({
+      bitbucketAccessToken: accessToken,
+      bitbucketRefreshToken: refreshToken,
+      bitbucketTokenExpiresAt: tokenExpiresAt,
+    });
+
+    return redirectWithStatus('success');
+  } catch (err) {
+    server.log.error(err);
+    return redirectWithStatus('error', 'oauth_exchange_failed');
+  }
+});
+
+server.post('/api/bitbucket/disconnect', async (request, reply) => {
+  bitbucketConfig.accessToken = '';
+  bitbucketConfig.refreshToken = '';
+  bitbucketConfig.tokenExpiresAt = 0;
+
+  appConfig.bitbucket = {
+    username: '',
+    displayName: '',
+    workspaces: [],
+  };
+  saveConfig(appConfig);
+
+  updateEnvFile({
+    bitbucketAccessToken: '',
+    bitbucketRefreshToken: '',
+    bitbucketTokenExpiresAt: 0,
   });
 
   return { success: true };
