@@ -618,39 +618,78 @@ server.post('/api/ai/config', async (request, reply) => {
 });
 
 server.get('/api/jira/issues', async (request, reply) => {
-  if (!jiraConfig.domain || !jiraConfig.token) {
-    return reply.status(401).send({ error: 'Jira not connected' });
+  if (jiraConfig.domain && jiraConfig.token) {
+    try {
+      const auth = Buffer.from(`${jiraConfig.email}:${jiraConfig.token}`).toString('base64');
+      const url = `https://${jiraConfig.domain}/rest/api/3/search/jql`;
+
+      const response = await axios.post(url, {
+        jql: "assignee = currentUser()",
+        maxResults: 50,
+        fields: [
+          "summary",
+          "status",
+          "assignee"
+        ]
+      }, {
+        headers: {
+          'Authorization': `Basic ${auth}`,
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        }
+      });
+
+      return response.data.issues.map((issue: any) => ({
+        id: issue.key,
+        title: issue.fields.summary,
+        status: issue.fields.status.name,
+      }));
+    } catch (err: any) {
+      server.log.error(err);
+      return reply.status(500).send({ error: 'Failed to fetch Jira issues' });
+    }
   }
 
-  try {
-    const auth = Buffer.from(`${jiraConfig.email}:${jiraConfig.token}`).toString('base64');
-    const url = `https://${jiraConfig.domain}/rest/api/3/search`;
-    
-    const response = await axios.post(url, {
-      jql: "assignee = currentUser() AND statusCategory != Done",
-      maxResults: 50,
-      fields: [
-        "summary",
-        "status",
-        "assignee"
-      ]
-    }, {
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Accept': 'application/json',
-        'Content-Type': 'application/json'
+  if (atlassianConfig.accessToken) {
+    try {
+      const sites = Array.isArray(appConfig.atlassian?.sites) ? appConfig.atlassian.sites : [];
+      const jiraSite = sites.find((site: any) => typeof site?.url === 'string' && site.url.includes('atlassian.net')) || sites[0];
+
+      if (!jiraSite?.id) {
+        return reply.status(401).send({ error: 'No Jira cloud site available for OAuth connection' });
       }
-    });
 
-    return response.data.issues.map((issue: any) => ({
-      id: issue.key,
-      title: issue.fields.summary,
-      status: issue.fields.status.name,
-    }));
-  } catch (err: any) {
-    server.log.error(err);
-    return reply.status(500).send({ error: 'Failed to fetch Jira issues' });
+      const searchUrl = `https://api.atlassian.com/ex/jira/${jiraSite.id}/rest/api/3/search/jql`;
+      const payload = {
+        jql: "assignee = currentUser()",
+        maxResults: 100,
+        fields: ["summary", "status"],
+        fieldsByKeys: true
+      };
+
+      const curlCommand = `curl -X POST "${searchUrl}" -H "Authorization: Bearer ${atlassianConfig.accessToken}" -H "Accept: application/json" -H "Content-Type: application/json" -d '${JSON.stringify(payload)}'`;
+      server.log.info({ curlCommand }, "DEBUG: Equivalent curl command for Atlassian API (Issues)");
+
+      const response = await axios.post(searchUrl, payload, {
+        headers: {
+          'Authorization': `Bearer ${atlassianConfig.accessToken}`,
+          'Accept': 'application/json',
+          'Content-Type': 'application/json'
+        }
+      });
+
+      return (response.data.issues || []).map((issue: any) => ({
+        id: issue.key,
+        title: issue.fields?.summary || 'No summary',
+        status: issue.fields?.status?.name || 'Unknown',
+      }));
+    } catch (err: any) {
+      server.log.error({ err }, 'Failed to fetch Jira issues via Atlassian OAuth');
+      return reply.status(500).send({ error: 'Failed to fetch Jira issues via Atlassian OAuth' });
+    }
   }
+
+  return reply.status(401).send({ error: 'Jira not connected' });
 });
 
 server.get('/api/slack/messages', async (request, reply) => {
@@ -705,14 +744,14 @@ server.post('/api/chat', async (request, reply) => {
 
   let fullPrompt = message;
 
-  // 1. Fetch tickets if Jira is connected
+  // 1. Fetch tickets if Jira is connected via API key
   if (jiraConfig.domain && jiraConfig.token) {
     try {
       const auth = Buffer.from(`${jiraConfig.email}:${jiraConfig.token}`).toString('base64');
-      const url = `https://${jiraConfig.domain}/rest/api/3/search/jql/`;
+      const url = `https://${jiraConfig.domain}/rest/api/3/search/jql`;
       
       const response = await axios.post(url, {
-        jql: "assignee = currentUser() AND statusCategory != Done",
+        jql: "assignee = currentUser()",
         maxResults: 50,
         fields: [
           "summary",
@@ -734,11 +773,66 @@ server.post('/api/chat', async (request, reply) => {
       }));
 
       if (issues.length > 0) {
-        const ticketsContext = issues.map((i: any) => `- [${i.key}] ${i.summary} (${i.status})`).join('\n');
-        fullPrompt = `You are a helpful assistant. Use the following Jira context to help the user:\n\nActive Jira Tickets:\n${ticketsContext}\n\nUser Message: ${message}`;
+        fullPrompt = `You are a helpful assistant. Use the following Jira context (provided as JSON) to help the user:\n\n${JSON.stringify(issues, null, 2)}\n\nUser Message: ${message}`;
       }
     } catch (err) {
       server.log.error({ err }, "Failed to fetch Jira context for chat");
+    }
+  } else if (atlassianConfig.accessToken) {
+    // 1b. Fetch ALL Jira tickets if connected via Atlassian OAuth
+    try {
+      const sites = Array.isArray(appConfig.atlassian?.sites) ? appConfig.atlassian.sites : [];
+      const jiraSite = sites.find((site: any) => typeof site?.url === 'string' && site.url.includes('atlassian.net')) || sites[0];
+
+      if (jiraSite?.id) {
+        const allIssues: any[] = [];
+        let startAt = 0;
+        const maxResults = 100;
+        let total = 0;
+
+        do {
+          const searchUrl = `https://api.atlassian.com/ex/jira/${jiraSite.id}/rest/api/3/search/jql`;
+          const payload = {
+            jql: "assignee = currentUser()",
+            maxResults,
+            fields: ['summary', 'status'],
+            fieldsByKeys: true
+          };
+
+          const curlCommand = `curl -X POST "${searchUrl}" -H "Authorization: Bearer ${atlassianConfig.accessToken}" -H "Accept: application/json" -H "Content-Type: application/json" -d '${JSON.stringify(payload)}'`;
+          server.log.info({ curlCommand }, "DEBUG: Equivalent curl command for Atlassian API (Chat)");
+
+          // In standard Jira Cloud JQL POST, pagination uses startAt in the payload as well if needed.
+          // Since you requested removal of startAt entirely:
+          const response = await axios.post(searchUrl, payload, {
+            headers: {
+              'Authorization': `Bearer ${atlassianConfig.accessToken}`,
+              'Accept': 'application/json',
+              'Content-Type': 'application/json'
+            },
+          });
+
+          const pageIssues = Array.isArray(response.data?.issues) ? response.data.issues : [];
+          // Without startAt pagination, we just break after the first page
+          allIssues.push(...pageIssues);
+          break;
+
+        } while (false);
+
+        if (allIssues.length > 0) {
+          const ticketsContext = allIssues.map((issue: any) => ({
+            key: issue.key,
+            summary: issue.fields?.summary || 'No summary',
+            status: issue.fields?.status?.name || 'Unknown'
+          }));
+
+          fullPrompt = `You are a helpful assistant. Use the following Jira context (provided as JSON) to help the user:\n\n${JSON.stringify(ticketsContext, null, 2)}\n\nUser Message: ${message}`;
+        }
+      } else {
+        server.log.warn('No Jira cloud site found in Atlassian OAuth resources');
+      }
+    } catch (err) {
+      server.log.error({ err }, 'Failed to fetch Jira context via Atlassian OAuth for chat');
     }
   }
 
@@ -781,8 +875,8 @@ server.post('/api/chat', async (request, reply) => {
       }
 
       if (githubContext) {
-        if (fullPrompt.includes('Active Jira Tickets')) {
-          fullPrompt = fullPrompt.replace('\n\nUser Message:', `\n\n${githubContext}User Message:`);
+        if (fullPrompt !== message) {
+          fullPrompt = fullPrompt.replace('\n\nUser Message:', `\n\nGitHub context:\n${githubContext}User Message:`);
         } else {
           fullPrompt = `You are a helpful assistant. Use the following GitHub context to help the user:\n\n${githubContext}User Message: ${message}`;
         }
